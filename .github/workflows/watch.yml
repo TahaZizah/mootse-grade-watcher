@@ -1,17 +1,15 @@
 name: Mootse grade watcher
 
-# GitHub's cron is unreliable on this repo, so each run waits ~10 min and then
-# starts the next run itself (workflow_dispatch via GITHUB_TOKEN). The cron
-# below is only a backup that restarts the chain if it ever breaks; the
-# concurrency group guarantees only one chain runs at a time.
+# Started every 10 minutes by cron-job.org (workflow_dispatch via the GitHub API).
+# Each run is independent: if GitHub fails to start one, the next one still comes.
+# GitHub's own cron below is just an extra backup (it is unreliable on its own).
 on:
+  workflow_dispatch: {}
   schedule:
     - cron: "*/30 * * * *"
-  workflow_dispatch: {}
 
 permissions:
   contents: write   # commit state.json
-  actions: write    # start the next run
 
 concurrency:
   group: mootse-watch
@@ -20,7 +18,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
@@ -38,13 +36,5 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add state.json
             git commit -m "Update grade state"
-            git push
+            for i in 1 2 3; do git pull --rebase -q origin main && git push -q && break; sleep 5; done
           fi
-
-      - name: Wait, then start the next check
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          sleep 570
-          gh workflow run watch.yml --repo "$GITHUB_REPOSITORY" --ref main

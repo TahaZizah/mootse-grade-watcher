@@ -240,8 +240,34 @@ def check():
         STATE_FILE.write_text(json.dumps(new_state, indent=1, sort_keys=True), encoding="utf-8")
 
 
+FAIL_ALERT_AFTER = 3  # consecutive failed checks (~30 min) before warning
+
+
+def check_with_alarm():
+    """Run check(); push a warning if checks keep failing, and an all-clear when they recover."""
+    topic = os.environ.get("NTFY_TOPIC")
+    try:
+        check()
+    except Exception as e:
+        saved = json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
+        saved["fails"] = saved.get("fails", 0) + 1
+        if saved["fails"] == FAIL_ALERT_AFTER and topic and not saved.get("expired_notified"):
+            notify(topic, "Mootse watcher: checks are failing",
+                   f"The last {FAIL_ALERT_AFTER} checks failed ({type(e).__name__}). "
+                   "Grades may be missed until this is fixed.",
+                   tags=("warning",), priority=4)
+        STATE_FILE.write_text(json.dumps(saved, indent=1, sort_keys=True), encoding="utf-8")
+        raise
+    # check() rewrote the state without "fails"; tell the user if we had alerted before.
+    if _previous_fails >= FAIL_ALERT_AFTER and topic:
+        notify(topic, "Mootse watcher is back", "Checks are working again.",
+               tags=("white_check_mark",), priority=3)
+
+
 if __name__ == "__main__":
     if "--get-token" in sys.argv:
         get_token()
     else:
-        check()
+        _prev = json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
+        _previous_fails = _prev.get("fails", 0)
+        check_with_alarm()
