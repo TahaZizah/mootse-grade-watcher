@@ -1,7 +1,8 @@
 name: Mootse grade watcher
 
-# Started every 10 minutes by cron-job.org (workflow_dispatch via the GitHub API).
+# Started every 5 minutes by cron-job.org (workflow_dispatch via the GitHub API).
 # Each run is independent: if GitHub fails to start one, the next one still comes.
+# healthchecks.io (HC_PING_URL) alerts you if no check succeeds for 30 minutes.
 # GitHub's own cron below is just an extra backup (it is unreliable on its own).
 on:
   workflow_dispatch: {}
@@ -20,12 +21,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check grades
         env:
           MOODLE_TOKEN: ${{ secrets.MOODLE_TOKEN }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          HC_PING_URL: ${{ secrets.HC_PING_URL }}
         run: python3 mootse_watch.py
 
       - name: Save state
