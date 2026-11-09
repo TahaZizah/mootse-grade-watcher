@@ -4,7 +4,7 @@ on:
   schedule:
     # Every 10 min (public repo = unlimited free minutes).
     # GitHub may start scheduled runs a few minutes late.
-    - cron: "3,13,23,33,43,53 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch: {}   # adds a "Run workflow" button for testing
 
 permissions:
