@@ -203,18 +203,20 @@ def check():
     if not token or not topic:
         sys.exit("MOODLE_TOKEN and NTFY_TOPIC must be set.")
 
+    saved = json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
     try:
         new = fetch_grades(token)
     except MoodleError as e:
-        if e.errorcode in ("invalidtoken", "accessexception"):
+        if e.errorcode in ("invalidtoken", "accessexception") and not saved.get("expired_notified"):
             notify(topic, "Mootse watcher: token expired",
                    "Run `python mootse_watch.py --get-token` again and update the MOODLE_TOKEN secret.",
                    tags=("warning",), priority=3)
+            saved["expired_notified"] = True  # alert once, not every 10 minutes
+            STATE_FILE.write_text(json.dumps(saved, indent=1, sort_keys=True), encoding="utf-8")
         raise
 
     secret = token
     check_fp = fp("__check__", "", secret)
-    saved = json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
     # First run, or token changed (fingerprints no longer comparable): re-baseline quietly.
     first_run = saved.get("check") != check_fp
     old_state = saved.get("items", {})
