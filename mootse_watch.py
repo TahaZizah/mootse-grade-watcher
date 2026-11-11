@@ -19,6 +19,13 @@ Environment variables:
   NTFY_SERVER    default https://ntfy.sh
   STATE_FILE     default state.json (next to this script)
 
+What counts as a grade:
+  * Every graded item (assignments, tests, "Élément manuel"...).
+  * Category totals and the course total too, because teachers sometimes type a
+    grade straight into a total (or it comes from a hidden item), with every
+    visible line still "-". A total only gets its own push when nothing below it
+    changed in the same check, so one new grade never causes several pushes.
+
 Reliability rules:
   * Network errors and 5xx answers are retried a few times before giving up.
   * A grade is only recorded as "seen" once its push was accepted by ntfy, so a
@@ -47,6 +54,8 @@ MOODLE_URL = os.environ.get("MOODLE_URL", "https://mootse.telecom-st-etienne.fr"
 NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
 STATE_FILE = Path(os.environ.get("STATE_FILE", Path(__file__).with_name("state.json")))
 HC_PING_URL = os.environ.get("HC_PING_URL", "").strip().rstrip("/")
+STATE_VERSION = 2  # v2: totals are tracked too
+LEVELS = ("item", "category", "course")  # most specific first
 MAX_SEPARATE_NOTIFICATIONS = 6  # more changes than this at once -> one summary push
 FAIL_ALERT_AFTER = 3            # consecutive failed runs before warning (when no HC_PING_URL)
 RETRIES = 3
@@ -164,7 +173,7 @@ def fmt_grade(item):
 
 
 def fetch_grades(token):
-    """Return {key: {course, courseid, item, grade, total}} for every graded item."""
+    """Return {key: {course, courseid, level, item, grade, total}} for every graded line."""
     site = ws(token, "core_webservice_get_site_info")
     userid = site["userid"]
     courses = ws(token, "core_enrol_get_users_courses", userid=userid)
@@ -189,17 +198,22 @@ def fetch_grades(token):
             items = ug.get("gradeitems", [])
             total = next((fmt_grade(i) for i in items if i.get("itemtype") == "course"), "")
             for item in items:
-                # Course/category totals change whenever an item changes;
-                # only track the real items so you get one push per new grade.
-                if item.get("itemtype") in ("course", "category"):
-                    continue
                 grade = fmt_grade(item)
                 if not grade or grade.startswith("-"):
                     continue
-                name = (item.get("itemname") or "").strip() or item.get("itemmodule") or "Grade"
+                itemtype = item.get("itemtype")
+                raw_name = clean(item.get("itemname"))
+                if itemtype == "course":
+                    level, name = "course", "Course total"
+                elif itemtype == "category":
+                    level, name = "category", f"Total {raw_name}" if raw_name else "Category total"
+                else:
+                    level = "item"
+                    name = raw_name or item.get("itemmodule") or "Grade"
                 grades[f"{cid}:{item['id']}"] = {
                     "course": cname,
                     "courseid": cid,
+                    "level": level,
                     "item": name,
                     "grade": grade,
                     "total": total if total and not total.startswith("-") else "",
@@ -221,6 +235,27 @@ def diff(old_items, grades, secret):
     return changes
 
 
+def plan_pushes(changes):
+    """Group changes by course and pick what to push.
+
+    In each course only the most specific level that changed is pushed: grade
+    items if any changed, else category totals, else the course total. The rest
+    changed only as a consequence and is recorded silently.
+    Returns [(to_push, silent)] per course.
+    """
+    by_course = {}
+    for change in changes:
+        by_course.setdefault(change[2]["courseid"], []).append(change)
+    groups = []
+    for course_changes in by_course.values():
+        for level in LEVELS:
+            picked = [c for c in course_changes if c[2].get("level", "item") == level]
+            if picked:
+                break
+        groups.append((picked, [c for c in course_changes if c not in picked]))
+    return groups
+
+
 def report_url(courseid):
     return f"{MOODLE_URL}/grade/report/user/index.php?id={courseid}"
 
@@ -240,7 +275,7 @@ def push_changes(topic, changes):
         else:
             title = f"Grade updated: {c['course']}"
             msg = f"{c['item']}: now {c['grade']}"
-        if c.get("total"):
+        if c.get("total") and c.get("level", "item") != "course":
             msg += f"\nCourse total: {c['total']}"
         if notify(topic, title, msg, click=report_url(c["courseid"])):
             delivered.add(key)
@@ -298,14 +333,35 @@ def check(token, topic):
         old_items = saved.get("items", {})
         items = dict(old_items)  # never drop seen grades (see module docstring)
         changes = diff(old_items, grades, secret)
-        delivered = push_changes(topic, changes) if changes else set()
-        for _, key, _ in changes:
-            if key in delivered:
-                items[fp(key, "", secret)] = current[fp(key, "", secret)]
-        undelivered = len(changes) - len(delivered)
-        summary = f"{len(changes)} change(s), {undelivered} undelivered; {len(grades)} grades tracked."
 
-    new_state = {"check": check_fp, "items": items}
+        def record(key):
+            items[fp(key, "", secret)] = current[fp(key, "", secret)]
+
+        if saved.get("v", 1) < STATE_VERSION:
+            # Upgrading from a version that ignored totals: absorb the totals that
+            # are already there instead of pushing all of them as "new".
+            for kind, key, c in changes:
+                if kind == "new" and c.get("level", "item") != "item":
+                    record(key)
+            changes = [ch for ch in changes if not (ch[0] == "new" and ch[2].get("level", "item") != "item")]
+
+        groups = plan_pushes(changes)
+        to_push = [c for picked, _ in groups for c in picked]
+        delivered = push_changes(topic, to_push) if to_push else set()
+        undelivered = 0
+        for picked, silent in groups:
+            missed = [key for _, key, _ in picked if key not in delivered]
+            undelivered += len(missed)
+            for _, key, _ in picked:
+                if key in delivered:
+                    record(key)
+            if not missed:  # only once the course's push went through
+                for _, key, _ in silent:
+                    record(key)
+        summary = (f"{len(to_push)} push(es) for {len(changes)} change(s), {undelivered} undelivered; "
+                   f"{len(grades)} grades tracked.")
+
+    new_state = {"v": STATE_VERSION, "check": check_fp, "items": items}
     if new_state != saved:
         save_state(new_state)
     if undelivered:

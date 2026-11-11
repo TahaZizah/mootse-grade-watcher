@@ -31,6 +31,10 @@ cron-job.org ──every 5 min──▶ GitHub Actions ──▶ mootse_watch.py
   its push went through (so a failed push is retried, never lost), and never
   forgets a seen grade (so a course that fails to load once can't cause
   duplicate pushes).
+- **Totals count too.** Teachers sometimes put a grade straight into a
+  category total (e.g. "Total de Contrôle Continu") while every line under it
+  stays "-". Totals are watched, but a total only gets its own push when
+  nothing under it changed, so one new grade never gives you several pushes.
 - **state.json** holds keyed fingerprints of your grades (HMAC with your
   Mootse token as the key). Nothing in it can be read back without the
   token, so the repo can stay public, which gives it unlimited free
